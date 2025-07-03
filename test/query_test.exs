@@ -355,6 +355,193 @@ defmodule Ash.Test.QueryTest do
       assert "bar.com" in domains
       assert "baz.com" in domains
     end
+
+    test "combination with sort applied after combination_of" do
+      Ash.create!(User, %{name: "charlie", email: "c@bar.com"})
+      Ash.create!(User, %{name: "alice", email: "a@bar.com"})
+      Ash.create!(User, %{name: "bob", email: "b@baz.com"})
+      Ash.create!(User, %{name: "david", email: "d@baz.com"})
+
+      baseline_result =
+        User
+        |> Ash.Query.filter(contains(email, "bar.com") or contains(email, "baz.com"))
+        |> Ash.Query.sort([:name])
+        |> Ash.read!()
+
+      baseline_names = Enum.map(baseline_result, & &1.name)
+
+      combination_result =
+        User
+        |> Ash.Query.combination_of([
+          Ash.Query.Combination.base(filter: expr(contains(email, "bar.com"))),
+          Ash.Query.Combination.union_all(filter: expr(contains(email, "baz.com")))
+        ])
+        |> Ash.Query.sort([:name])
+        |> Ash.read!()
+
+      combination_names = Enum.map(combination_result, & &1.name)
+
+      assert baseline_names == combination_names
+    end
+
+    test "combination with calculations and sort by combinations() function" do
+      Ash.create!(User, %{name: "charlie", email: "c@bar.com"})
+      Ash.create!(User, %{name: "alice", email: "a@bar.com"})
+      Ash.create!(User, %{name: "bob", email: "b@baz.com"})
+      Ash.create!(User, %{name: "david", email: "d@baz.com"})
+
+      # Test combination with calculations and sorting by combinations() function
+      combination_result =
+        User
+        |> Ash.Query.for_read(:read)
+        |> Ash.Query.combination_of([
+          Ash.Query.Combination.base(
+            filter: expr(contains(email, "bar.com")),
+            calculations: %{
+              sort_order: calc(1.0, type: :float)
+            },
+            sort: [
+              {calc(1.0, type: :float), :desc}
+            ]
+          ),
+          Ash.Query.Combination.union(
+            filter: expr(contains(email, "baz.com")),
+            calculations: %{
+              sort_order: calc(0.5, type: :float)
+            },
+            sort: [
+              {calc(0.5, type: :float), :desc}
+            ]
+          )
+        ])
+        |> Ash.Query.sort([{calc(^combinations(:sort_order)), :desc}, :name], prepend: false)
+        |> Ash.read!()
+
+      combination_names = Enum.map(combination_result, & &1.name)
+      sort_orders = Enum.map(combination_result, &Map.get(&1.calculations, :sort_order))
+
+      # Should have all 4 users
+      assert length(combination_result) == 4
+
+      # Users from bar.com (sort_order 1.0) should come first, then baz.com (sort_order 0.5)
+      # Within each group, should be sorted by name
+      assert combination_names == ["alice", "charlie", "bob", "david"]
+      assert sort_orders == [1.0, 1.0, 0.5, 0.5]
+    end
+
+    test "combination sort before combination_of fails" do
+      Ash.create!(User, %{name: "charlie", email: "c@bar.com"})
+      Ash.create!(User, %{name: "alice", email: "a@bar.com"})
+      Ash.create!(User, %{name: "bob", email: "b@baz.com"})
+      Ash.create!(User, %{name: "david", email: "d@baz.com"})
+
+      # Bug report pattern: sort BEFORE combination_of, then combination ignores it
+      result =
+        User
+        # Sort applied BEFORE combination_of
+        |> Ash.Query.sort([:name])
+        |> Ash.Query.combination_of([
+          Ash.Query.Combination.base(
+            filter: expr(contains(email, "bar.com")),
+            calculations: %{
+              sort_order: calc(1.0, type: :float)
+            },
+            sort: [{calc(1.0, type: :float), :desc}]
+          ),
+          Ash.Query.Combination.union(
+            filter: expr(contains(email, "baz.com")),
+            calculations: %{
+              sort_order: calc(0.5, type: :float)
+            },
+            sort: [{calc(0.5, type: :float), :desc}]
+          )
+        ])
+        |> Ash.Query.sort([{calc(^combinations(:sort_order)), :desc}], prepend: false)
+        |> IO.inspect(label: "SORT")
+        |> Ash.read!()
+
+      # Baseline without combination
+      baseline =
+        User
+        |> Ash.Query.filter(contains(email, "bar.com") or contains(email, "baz.com"))
+        |> Ash.Query.sort([:name])
+        |> Ash.read!()
+
+      result_names = Enum.map(result, & &1.name)
+      baseline_names = Enum.map(baseline, & &1.name)
+
+      IO.puts("Combination result: #{inspect(result_names)}")
+      IO.puts("Baseline: #{inspect(baseline_names)}")
+
+      # This should fail - the sort before combination_of should be honored but isn't
+      assert result_names == baseline_names
+    end
+
+    test "combination with descending sort applied after combination_of" do
+      Ash.create!(User, %{name: "charlie", email: "c@bar.com"})
+      Ash.create!(User, %{name: "alice", email: "a@bar.com"})
+      Ash.create!(User, %{name: "bob", email: "b@baz.com"})
+      Ash.create!(User, %{name: "david", email: "d@baz.com"})
+
+      # Test with descending sort
+      baseline_result =
+        User
+        |> Ash.Query.filter(contains(email, "bar.com") or contains(email, "baz.com"))
+        |> Ash.Query.sort(name: :desc)
+        |> Ash.read!()
+
+      combination_result =
+        User
+        |> Ash.Query.combination_of([
+          Ash.Query.Combination.base(filter: expr(contains(email, "bar.com"))),
+          Ash.Query.Combination.union_all(filter: expr(contains(email, "baz.com")))
+        ])
+        |> Ash.Query.sort(name: :desc)
+        |> Ash.read!()
+
+      baseline_names = Enum.map(baseline_result, & &1.name)
+      combination_names = Enum.map(combination_result, & &1.name)
+
+      # Should be sorted in descending order
+      assert baseline_names == ["david", "charlie", "bob", "alice"]
+      assert combination_names == ["david", "charlie", "bob", "alice"]
+
+      assert baseline_names == combination_names,
+             "Combination query desc sort (#{inspect(combination_names)}) should match baseline (#{inspect(baseline_names)})"
+    end
+
+    test "combination with sort on email field after combination_of" do
+      Ash.create!(User, %{name: "user1", email: "z@bar.com"})
+      Ash.create!(User, %{name: "user2", email: "a@bar.com"})
+      Ash.create!(User, %{name: "user3", email: "m@baz.com"})
+      Ash.create!(User, %{name: "user4", email: "c@baz.com"})
+
+      # Test sorting by email instead of name
+      baseline_result =
+        User
+        |> Ash.Query.filter(contains(email, "bar.com") or contains(email, "baz.com"))
+        |> Ash.Query.sort([:email])
+        |> Ash.read!()
+
+      combination_result =
+        User
+        |> Ash.Query.combination_of([
+          Ash.Query.Combination.base(filter: expr(contains(email, "bar.com"))),
+          Ash.Query.Combination.union_all(filter: expr(contains(email, "baz.com")))
+        ])
+        |> Ash.Query.sort([:email])
+        |> Ash.read!()
+
+      baseline_emails = Enum.map(baseline_result, & &1.email)
+      combination_emails = Enum.map(combination_result, & &1.email)
+
+      # Should be sorted by email
+      assert baseline_emails == ["a@bar.com", "c@baz.com", "m@baz.com", "z@bar.com"]
+      assert combination_emails == ["a@bar.com", "c@baz.com", "m@baz.com", "z@bar.com"]
+
+      assert baseline_emails == combination_emails,
+             "Combination query email sort (#{inspect(combination_emails)}) should match baseline (#{inspect(baseline_emails)})"
+    end
   end
 
   describe "filter" do
